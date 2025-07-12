@@ -977,7 +977,7 @@ def process_season_data(year: int):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    target_years = [2024] # Add more years if needed
+    target_years = [2025] # Add more years if needed
     current_year = datetime.now().year
     if current_year not in target_years: target_years.append(current_year)
 
