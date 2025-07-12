@@ -1,0 +1,7 @@
+.env
+cache
+data_cache
+static_data
+__pycache__
+backend-api/cache
+.DS_Store
