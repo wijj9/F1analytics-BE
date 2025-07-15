@@ -8,3 +8,4 @@ gunicorn # To load .env file for backend if needed (e.g., for REDIS_URL)
 # redis
 pytest # Testing framework
 httpx # Required by FastAPI's TestClient
+supabase
