@@ -143,35 +143,29 @@ async def get_schedule(year: int):
 async def get_session_drivers(
         year: int = Query(..., description="Year of the season", example=2023),
         event: str = Query(..., description="Event name or Round Number", example="Bahrain Grand Prix"),
-        # Temporarily remove regex to test validation
         session: str = Query(..., description="Session type (e.g., R, Q, S, FP1, FP2, FP3)")
-        # session: str = Query(default="R", regex="^[RQSF][P123]?$", description="Session type (R, Q, S, FP1, FP2, FP3)")
 ):
-    """ Retrieves a list of drivers (code, name, team) who participated in a session. """
+    """ Retrieves a list of drivers (code, name, team) who participated in a session from Supabase. """
     print(f"Received request for session drivers: {year}, {event}, {session}")
     try:
-        # Handle event name vs round number AND replace hyphens/spaces consistently
         if isinstance(event, str) and not event.isdigit():
-            # Replace spaces AND hyphens with underscores for event names
             event_slug_corrected = event.replace(' ', '_').replace('-', '_').lower()
         else:
-            # Assume it's a round number, format consistently (lowercase)
-            event_slug_corrected = f"round_{event}".lower()  # Processor uses lowercase round_
-        # Assuming processor saves driver lists in charts dir now
-        cache_file = DATA_CACHE_PATH / str(year) / "charts" / f"{event_slug_corrected}_{session.upper()}_drivers.json"
-        print(f"Attempting to read cache file: {cache_file}")  # Add log for debugging path
-        cached_drivers = read_json_cache(cache_file)
+            event_slug_corrected = f"round_{event}".lower()
+
+        supabase_path = f"data/{year}/charts/{event_slug_corrected}_{session.upper()}_drivers.json"
+        print(f"Attempting to read Supabase file: {supabase_path}")
+        cached_drivers = read_json_from_supabase(SUPABASE_BUCKET, supabase_path)
+
         if cached_drivers is not None:
             print(f"Returning cached session drivers for {year} {event} {session}.")
             return cached_drivers
 
-        # If not cached, raise error (rely on processor script)
-        print(f"Cache miss for session drivers: {cache_file}")
+        print(f"Cache miss for session drivers: {supabase_path}")
         raise HTTPException(status_code=404,
                             detail=f"Session drivers data not available for {year} {event} {session}. Run processor script.")
     except Exception as e:
         print(f"Error fetching session drivers: {e}")
-        # Consider more specific error codes based on exception type if needed
         raise HTTPException(status_code=500, detail=f"Failed to fetch session drivers: {e}")
 
 
@@ -200,52 +194,42 @@ async def get_lap_times(
         event: str = Query(..., description="Event name or Round Number", example="Bahrain Grand Prix"),
         session: str = Query(..., description="Session type"),
         drivers: list[str] = Query(..., min_length=1, max_length=5, description="List of 1 to 5 driver codes")
-        # Increased max_length to 5
 ):
-    """ Retrieves and compares lap times for one to five drivers. """  # Updated docstring
+    """ Retrieves and compares lap times for one to five drivers from Supabase. """
     print(f"Received request for laptimes: {year}, {event}, {session}, drivers={drivers}")
-    if not (1 <= len(drivers) <= 5):  # Updated validation check
+    if not (1 <= len(drivers) <= 5):
         raise HTTPException(status_code=400, detail="Please provide 1 to 5 driver codes.")
     try:
-        # Handle event name vs round number AND replace hyphens/spaces consistently
         if isinstance(event, str) and not event.isdigit():
-            # Replace spaces AND hyphens with underscores for event names, then lowercase
             event_slug_corrected = event.replace(' ', '_').replace('-', '_').lower()
         else:
-            # Assume it's a round number, format consistently (lowercase)
-            event_slug_corrected = f"round_{event}".lower()  # Processor uses lowercase round_
-        # --- FIX: Include session ID in filename --- #
-        cache_file = DATA_CACHE_PATH / str(year) / "charts" / f"{event_slug_corrected}_{session.upper()}_laptimes.json"
-        # --- END FIX --- #
-        print(f"Attempting to read cache file: {cache_file}")  # Add log for debugging path
-        cached_laptimes = read_json_cache(cache_file)
+            event_slug_corrected = f"round_{event}".lower()
+
+        supabase_path = f"data/{year}/charts/{event_slug_corrected}_{session.upper()}_laptimes.json"
+        print(f"Attempting to read Supabase file: {supabase_path}")
+        cached_laptimes = read_json_from_supabase(SUPABASE_BUCKET, supabase_path)
+
         if cached_laptimes is not None:
-            # Filter cached data for requested drivers
             filtered_data = [
                 {
                     'LapNumber': lap['LapNumber'],
                     **{drv: lap.get(drv) for drv in drivers if drv in lap}
                 } for lap in cached_laptimes
             ]
-            # Check if all requested drivers were found in cache for at least one lap
+
             if any(all(drv in lap for drv in drivers) for lap in filtered_data):
                 print(f"Returning cached lap times for {drivers} in {year} {event} {session}.")
                 return filtered_data
-            # If cache hit but drivers seem missing, still return the filtered data or raise error
-            # For Simplicity, let's return what we found or raise if nothing matched
+
             if not filtered_data or not any(any(drv in lap for drv in drivers) for lap in filtered_data):
-                print(f"Cache hit, but requested drivers {drivers} not found in {cache_file}")
-                # Raise 404 as the data for *these specific drivers* isn't in the expected format/file
+                print(f"Cache hit, but requested drivers {drivers} not found in {supabase_path}")
                 raise HTTPException(status_code=404,
                                     detail=f"Lap time data for requested drivers not found in cache for {year} {event} {session}.")
             else:
-                # Return the data filtered from cache even if not all drivers present in every lap dict key
-                print(
-                    f"Returning potentially partially filtered cached lap times for {drivers} in {year} {event} {session}.")
+                print(f"Returning potentially partially filtered cached lap times for {drivers} in {year} {event} {session}.")
                 return filtered_data
 
-        # If cache file itself was not found
-        print(f"Cache miss for lap times: {cache_file}")
+        print(f"Cache miss for lap times: {supabase_path}")
         raise HTTPException(status_code=404,
                             detail=f"Lap time data not available for {year} {event} {session}. Run processor script.")
     except Exception as e:
@@ -570,32 +554,26 @@ async def get_lap_positions(
         event: str = Query(..., description="Event name or Round Number", example="Bahrain Grand Prix"),
         session: str = Query(..., description="Session type (R or S)")
 ):
-    """ Retrieves lap-by-lap position data for all drivers in a race or sprint session from cache. """
+    """ Retrieves lap-by-lap position data for all drivers in a race or sprint session from Supabase. """
     print(f"Received request for cached lap positions: {year}, {event}, {session}")
     if session not in ['R', 'S']:
         raise HTTPException(status_code=400,
                             detail="Position data is only available for Race (R) or Sprint (S) sessions.")
     try:
-        # Handle event name vs round number AND replace hyphens/spaces consistently
         if isinstance(event, str) and not event.isdigit():
-            # Replace spaces AND hyphens with underscores for event names, then lowercase
             event_slug_corrected = event.replace(' ', '_').replace('-', '_').lower()
         else:
-            # Assume it's a round number, format consistently (lowercase)
-            event_slug_corrected = f"round_{event}".lower()  # Processor uses lowercase round_
-        # Ensure the slug used for the filename is lowercase to match filesystem conventions
-        # --- FIX: Include session ID in filename --- #
-        positions_file = DATA_CACHE_PATH / str(
-            year) / "charts" / f"{event_slug_corrected}_{session.upper()}_positions.json"  # Use corrected slug and session ID
-        # --- END FIX --- #
-        print(f"Attempting to read cache file: {positions_file}")  # Add log for debugging path
-        positions_data = read_json_cache(positions_file)
+            event_slug_corrected = f"round_{event}".lower()
+
+        supabase_path = f"data/{year}/charts/{event_slug_corrected}_{session.upper()}_positions.json"
+        print(f"Attempting to read Supabase file: {supabase_path}")
+        positions_data = read_json_from_supabase(SUPABASE_BUCKET, supabase_path)
+
         if positions_data is None:
-            # TODO: Potentially fetch live if cache miss? Or rely on processor.
             raise HTTPException(status_code=404,
                                 detail=f"Lap position data not available for {year} {event} {session}. Run processor script.")
+
         print(f"Returning cached lap positions for {year} {event} {session}.")
-        # Data is already pivoted: [{'LapNumber': 1, 'VER': 1, 'LEC': 2, ...}, ...]
         return positions_data
     except HTTPException as http_exc:
         raise http_exc
@@ -707,10 +685,8 @@ async def get_available_sessions(
         event_slug_lower = event_slug_raw.lower()
 
         # --- Find available session files ---
-        event_results_path = DATA_CACHE_PATH / str(year) / "races"
-        if not event_results_path.exists():  # here check if it returns some kind of -
-            print(f"No results directory found for {year}")
-            return []
+        event_results_path = f"data/{year}/races"
+
 
         available_sessions = []
         # Define the order and mapping for all possible sessions/segments
