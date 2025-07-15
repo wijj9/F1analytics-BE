@@ -55,7 +55,10 @@ app = FastAPI(
 
 # --- CORS Configuration ---
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:8080')
-origins = [FRONTEND_URL]
+origins = [FRONTEND_URL,
+        "https://f1analytics-git-main-wijj9s-projects.vercel.app",
+        "https://f1analytics-two.vercel.app",
+]
 print(f"Allowing CORS origins: {origins}")
 app.add_middleware(
     CORSMiddleware,
