@@ -2,22 +2,30 @@ import os
 import json
 from pathlib import Path  # Keep pathlib.Path for filesystem operations
 import fastapi  # Import the full fastapi module
-from fastapi import FastAPI, HTTPException, Query, Depends, status  # Remove Path alias import
+import stripe
+from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi.requests import Request  # Import Request specifically from fastapi.requests
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np  # Keep numpy for NaN replacement if needed by chance
 from dotenv import load_dotenv
 import fastf1 as ff1
 import pandas as pd  # Import fastf1 for schedule
+
 # Re-import data_processing as it's needed again
 from api import data_processing
 import time  # Import time for logging
 
 from dotenv import load_dotenv
 
+from fastapi import APIRouter, Request
+
 load_dotenv()
 
 from supabase import create_client, Client
+
+
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")  # Set this in your .env or deployment environment
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_PRIVATE_KEY")
@@ -38,6 +46,8 @@ if not API_KEY:
     # raise ValueError("F1ANALYTICS_API_KEY environment variable is required for security.")
 
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_PRIVATE_KEY"))
 
 # Ensure FastF1 cache is enabled if not already by processor
 if not Path(FASTF1_CACHE_PATH).exists():
@@ -107,6 +117,78 @@ async def read_root():
     return {"message": "Welcome to the F1 Analytics Backend API"}
 
 
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(request: Request):
+    try:
+        data = await request.json()
+        print(f"Creating checkout session for request: {data}")
+
+        email = data.get("email")
+        if not email or email == "Email":  # Handle the hardcoded "Email" case
+            print("Error: No valid email provided in request")
+            raise HTTPException(status_code=400, detail="A valid email is required")
+
+        print(f"Creating Stripe checkout session for email: {email}")
+
+        # Use the correct frontend URL from environment
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:8080")
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=[
+                "card",
+                "klarna",
+                "paypal",
+            ],
+            line_items=[{
+                "price_data": {
+                    "currency": "eur",
+                    "product_data": {
+                        "name": "F1Analytics Premium Access"
+                    },
+                    "unit_amount": 500,  # €5.00 (amount in cents)
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            customer_email=email,
+            locale="en",
+            success_url=f"{frontend_url}/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{frontend_url}/cancel",
+            metadata={
+                "email": email,  # Store email in metadata for webhook processing
+            }
+        )
+
+        print(f"Stripe session created successfully: {session.id}")
+
+        # Store pending payment record in Supabase
+        try:
+            result = supabase.table("subscribed_users").upsert({
+                "email": email,
+                "is_unlocked": False,
+                "stripe_session_id": session.id,  # Store session ID
+            }, on_conflict="email").execute()
+            print(f"Supabase record upserted for email: {email}")
+        except Exception as db_error:
+            print(f"Warning: Failed to store pending payment in Supabase: {db_error}")
+            # Don't fail the checkout creation if DB storage fails
+
+        return {"url": session.url}
+
+    except stripe.error.StripeError as stripe_error:
+        print(f"Stripe error creating checkout session: {stripe_error}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Stripe error: {str(stripe_error)}"
+        )
+    except Exception as e:
+        print(f"Unexpected error creating checkout session: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create checkout session: {str(e)}"
+        )
+
+
 # --- Schedule Endpoint ---
 @app.get("/api/schedule/{year}", dependencies=[Depends(get_api_key)])
 async def get_schedule(year: int):
@@ -163,7 +245,7 @@ async def get_session_drivers(
 
         print(f"Cache miss for session drivers: {supabase_path}")
         raise HTTPException(status_code=404,
-                            detail=f"Session drivers data not available for {year} {event} {session}. Run processor script.")
+                            detail=f"Session drivers data not available for {year} {event} {session}.")
     except Exception as e:
         print(f"Error fetching session drivers: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch session drivers: {e}")
@@ -231,7 +313,7 @@ async def get_lap_times(
 
         print(f"Cache miss for lap times: {supabase_path}")
         raise HTTPException(status_code=404,
-                            detail=f"Lap time data not available for {year} {event} {session}. Run processor script.")
+                            detail=f"Lap time data not available for {year} {event} {session}.")
     except Exception as e:
         print(f"Error fetching lap times: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch lap times: {e}")
@@ -571,7 +653,7 @@ async def get_lap_positions(
 
         if positions_data is None:
             raise HTTPException(status_code=404,
-                                detail=f"Lap position data not available for {year} {event} {session}. Run processor script.")
+                                detail=f"Lap position data not available for {year} {event} {session}.")
 
         print(f"Returning cached lap positions for {year} {event} {session}.")
         return positions_data
@@ -594,7 +676,7 @@ async def get_driver_standings_api(year: int = Query(...)):
         if standings_data is None or 'drivers' not in standings_data:
             print(f"{time.time():.2f} - REQ ERROR: Driver Standings {year} - Not Found")
             raise HTTPException(status_code=404,
-                                detail=f"Driver standings not available for {year}. Run processor script.")
+                                detail=f"Driver standings not available for {year}.")
         result = standings_data['drivers']
         print(f"{time.time():.2f} - REQ END: Driver Standings {year} ({time.time() - start_time:.3f}s)")
         return result
@@ -617,7 +699,7 @@ async def get_team_standings_api(year: int = Query(...)):
         if standings_data is None or 'teams' not in standings_data:
             print(f"{time.time():.2f} - REQ ERROR: Team Standings {year} - Not Found")
             raise HTTPException(status_code=404,
-                                detail=f"Team standings not available for {year}. Run processor script.")
+                                detail=f"Team standings not available for {year}.")
         result = standings_data['teams']
         print(f"{time.time():.2f} - REQ END: Team Standings {year} ({time.time() - start_time:.3f}s)")
         return result
@@ -640,7 +722,7 @@ async def get_race_results_summary_api(year: int = Query(...)):
         if results_data is None:
             print(f"{time.time():.2f} - REQ ERROR: Race Results Summary {year} - Not Found")
             raise HTTPException(status_code=404,
-                                detail=f"Race results summary not available for {year}. Run processor script.")
+                                detail=f"Race results summary not available for {year}.")
         print(f"{time.time():.2f} - REQ END: Race Results Summary {year} ({time.time() - start_time:.3f}s)")
         return results_data
     except HTTPException as http_exc:
@@ -755,7 +837,7 @@ async def get_specific_race_result_api(
         if results_data is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Results not available for {year} {event_slug} {session}. Run processor script."
+                detail=f"Results not available yet for {year} {event_slug} {session}."
             )
 
         return results_data
@@ -811,3 +893,160 @@ async def test_supabase_read():
         raise HTTPException(status_code=404, detail=f"File not found or failed to decode at {test_path}")
 
     return {"status": "success", "preview": data[:3] if isinstance(data, list) else data}
+
+
+
+@app.get("/api/check-subscription")
+async def check_subscription(email: str):
+    """Check if a user has an active subscription"""
+    try:
+        result = supabase.table("subscribed_users").select("is_active, payment_status").eq("email", email).execute()
+        if result.data and len(result.data) > 0:
+            user_data = result.data[0]
+            return {
+                "isSubscribed": user_data.get("is_active", False),
+                "paymentStatus": user_data.get("payment_status", "none")
+            }
+        return {"isSubscribed": False, "paymentStatus": "none"}
+    except Exception as e:
+        print(f"Error checking subscription for {email}: {e}")
+        return {"isSubscribed": False, "paymentStatus": "error"}
+
+
+@app.post("/api/create-payment-intent")
+async def create_payment_intent(request: Request):
+    data = await request.json()
+    try:
+        intent = stripe.PaymentIntent.create(
+            amount=data["amount"],  # amount in cents
+            currency="usd",
+            # You can add more parameters as needed
+        )
+        return {"clientSecret": intent.client_secret}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+        print(f"Received Stripe webhook event: {event['type']}")
+    except Exception as e:
+        print(f"Webhook signature verification failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Webhook signature verification failed: {str(e)}")
+
+    # Handle successful payment completion
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        customer_email = session.get("customer_email")
+        session_id = session.get("id")
+
+        print(f"Processing successful payment for email: {customer_email}, session: {session_id}")
+
+        if not customer_email:
+            print("Warning: No customer email found in webhook session data")
+            return {"status": "success", "message": "No customer email found"}
+
+        try:
+            # Update user as active subscriber with more detailed tracking
+            result = supabase.table("subscribed_users").update({
+                "is_active": True,
+                "stripe_customer_id": session.get("customer"),
+                "stripe_session_id": session_id,
+                "payment_status": "completed",
+                "payment_amount": session.get("amount_total", 500),  # Amount in cents
+                "payment_currency": session.get("currency", "eur"),
+                "payment_date": "now()",
+                "updated_at": "now()"
+            }).eq("email", customer_email).execute()
+
+            print(f"Successfully updated subscription status for {customer_email}")
+
+            # Optional: Log the payment in a separate payments table for better tracking
+            try:
+                payment_record = supabase.table("payments").insert({
+                    "email": customer_email,
+                    "stripe_session_id": session_id,
+                    "stripe_customer_id": session.get("customer"),
+                    "amount": session.get("amount_total", 500),
+                    "currency": session.get("currency", "eur"),
+                    "payment_status": "completed",
+                    "payment_method": "stripe_checkout",
+                    "created_at": "now()"
+                }).execute()
+                print(f"Payment record created for {customer_email}")
+            except Exception as payment_log_error:
+                print(f"Warning: Failed to log payment record: {payment_log_error}")
+                # Don't fail the webhook if payment logging fails
+
+        except Exception as db_error:
+            print(f"Error updating subscription status: {db_error}")
+            # Consider whether to return error or success here
+            # Returning success to avoid Stripe retrying if the payment actually succeeded
+            return {"status": "error", "message": f"Database update failed: {str(db_error)}"}
+
+    elif event["type"] == "checkout.session.expired":
+        # Handle expired checkout sessions
+        session = event["data"]["object"]
+        customer_email = session.get("customer_email")
+        session_id = session.get("id")
+
+        print(f"Checkout session expired for email: {customer_email}, session: {session_id}")
+
+        if customer_email:
+            try:
+                # Update the payment status to expired
+                supabase.table("subscribed_users").update({
+                    "payment_status": "expired",
+                    "updated_at": "now()"
+                }).eq("email", customer_email).eq("stripe_session_id", session_id).execute()
+            except Exception as db_error:
+                print(f"Error updating expired session status: {db_error}")
+
+    else:
+        print(f"Unhandled webhook event type: {event['type']}")
+
+    return {"status": "success"}
+
+
+@app.get("/api/verify-payment")
+async def verify_payment(session_id: str):
+    """Verify payment completion and update subscription status"""
+    try:
+        # Retrieve the session from Stripe
+        session = stripe.checkout.Session.retrieve(session_id)
+
+        if session.payment_status == "paid":
+            customer_email = session.customer_email
+
+            if customer_email:
+                # Update subscription status in database
+                result = supabase.table("subscribed_users").upsert({
+                    "email": customer_email,
+                    "is_active": True,
+                    "payment_status": "completed",
+                    "stripe_session_id": session_id,
+                    "stripe_customer_id": session.customer,
+                    "payment_amount": session.amount_total,
+                    "payment_currency": session.currency,
+                    "updated_at": "now()"
+                }, on_conflict="email").execute()
+
+                print(f"Payment verified and subscription activated for {customer_email}")
+
+                return {
+                    "success": True,
+                    "email": customer_email,
+                    "isSubscribed": True
+                }
+
+        return {"success": False, "message": "Payment not completed"}
+
+    except Exception as e:
+        print(f"Error verifying payment for session {session_id}: {e}")
+        return {"success": False, "message": str(e)}
